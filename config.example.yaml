@@ -1,0 +1,14 @@
+interval: 60    # in seconds
+signalfx:
+  auth_token: your_token
+clusters:
+  - uris:
+    - mongodb://host1,host2:27017/?replSet=rs1
+    - mongodb://host3,host4:27018/?replSet=rs2
+    username: user
+    password: password
+  - uris:
+    - mongodb://host4,host5:27017/?replSet=rs3
+    username: other_user
+    password: other_pw
+  
