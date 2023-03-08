@@ -59,12 +59,13 @@ func (m *Monitoring) run(ctx context.Context, clusters []config.Cluster) {
 
 		for _, uri := range c.Uris {
 			uri := uri
+			l := logrus.WithField("cluster", uri)
 			go func() {
 				defer wg.Done()
 
 				hosts, err := discoverTopology(context.Background(), uri, c.Username, c.Password)
 				if err != nil {
-					logrus.Error(err)
+					l.Error(err)
 					return
 				}
 
@@ -72,10 +73,11 @@ func (m *Monitoring) run(ctx context.Context, clusters []config.Cluster) {
 				wgM.Add(len(hosts))
 				for _, host := range hosts {
 					host := host
+					l := l.WithField("host", host)
 					go func() {
 						defer wgM.Done()
 						if err := m.gatherMetrics(context.Background(), host, c.Username, c.Password); err != nil {
-							logrus.Error(err)
+							l.Error(err)
 							return
 						}
 					}()
