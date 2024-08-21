@@ -35,7 +35,7 @@ func NewMonitoring(cfg *config.Config) *Monitoring {
 
 func (m *Monitoring) Start(ctx context.Context) error {
 	logrus.Infof("Starting MongoDB monitoring every %s", m.interval.String())
-	logrus.Infof("Detected %d clusters from config", len(m.clusters))
+	logrus.Infof("Detected %d cluster group from config", len(m.clusters))
 
 	go m.run(ctx, m.clusters)
 
@@ -54,29 +54,73 @@ func (m *Monitoring) run(ctx context.Context, clusters []config.Cluster) {
 	logrus.Debug("Started metrics gathering")
 
 	for _, c := range clusters {
-		c := c
 		wg.Add(len(c.Uris))
 
 		for _, uri := range c.Uris {
-			uri := uri
 			l := logrus.WithField("cluster", uri)
 			go func() {
 				defer wg.Done()
 
-				hosts, err := discoverTopology(context.Background(), uri, c.Username, c.Password)
+				ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+
+				credential := options.Credential{
+					AuthSource: "admin",
+					Username:   c.Username,
+					Password:   c.Password,
+				}
+
+				cl, err := mongo.Connect(ctx, options.Client().ApplyURI(uri).SetAuth(credential))
+				if err != nil {
+					l.Errorf("Could not connect to cluster. Err: %s", err)
+					return
+				}
+
+				defer func() {
+					if err = cl.Disconnect(ctx); err != nil {
+						l.Errorf("Could not disconnect from cluster. Err: %s", err)
+					}
+				}()
+
+				hosts, err := discoverTopology(ctx, uri, cl)
 				if err != nil {
 					l.Error(err)
 					return
 				}
 
-				var wgM sync.WaitGroup
+				lag, err := getReplicationLag(ctx, cl)
+				if err != nil {
+					l.Error(err)
+					return
+				}
+
+				for _, e := range lag {
+					l.Debugf("Replication lag %.1fs %s", e.lag.Seconds(), e.host)
+				}
+
+				wgM := sync.WaitGroup{}
 				wgM.Add(len(hosts))
 				for _, host := range hosts {
-					host := host
 					l := l.WithField("host", host)
 					go func() {
 						defer wgM.Done()
-						if err := m.gatherMetrics(context.Background(), host, c.Username, c.Password); err != nil {
+						if err := m.gatherMetrics(ctx, host, c.Username, c.Password); err != nil {
+							l.Error(err)
+							return
+						}
+					}()
+				}
+
+				wgL := sync.WaitGroup{}
+				wgL.Add(len(lag))
+				for _, lagEntry := range lag {
+					l := l.WithField("host", lagEntry.host)
+					go func() {
+						defer wgL.Done()
+						err := m.sendMetrics(ctx, []*datapoint.Datapoint{
+							sfxclient.GaugeF("mongodb.lag.seconds", map[string]string{"host": lagEntry.host}, lagEntry.lag.Seconds()),
+						})
+						if err != nil {
 							l.Error(err)
 							return
 						}
@@ -84,6 +128,7 @@ func (m *Monitoring) run(ctx context.Context, clusters []config.Cluster) {
 				}
 
 				wgM.Wait()
+				wgL.Wait()
 			}()
 		}
 	}
@@ -92,9 +137,6 @@ func (m *Monitoring) run(ctx context.Context, clusters []config.Cluster) {
 }
 
 func (m *Monitoring) gatherMetrics(ctx context.Context, host, user, password string) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	credential := options.Credential{
 		AuthSource: "admin",
 		Username:   user,
@@ -131,9 +173,6 @@ func (m *Monitoring) gatherMetrics(ctx context.Context, host, user, password str
 }
 
 func (m *Monitoring) sendMetrics(ctx context.Context, datapoints []*datapoint.Datapoint) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	client := sfxclient.NewHTTPSink()
 	client.AuthToken = m.authToken
 	return client.AddDatapoints(ctx, datapoints)
