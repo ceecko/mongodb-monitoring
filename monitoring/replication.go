@@ -44,14 +44,12 @@ func getReplicationLag(ctx context.Context, cl *mongo.Client) ([]*replicationLag
 		return nil, errors.New("no primary detected")
 	}
 
-	var lag []*replicationLag
+	lag := make([]*replicationLag, 0, len(status.Members))
 	for _, m := range status.Members {
-		if m.StateStr != "PRIMARY" {
-			lag = append(lag, &replicationLag{
-				host: m.Name,
-				lag:  optimePrimary.Sub(m.OptimeDate),
-			})
-		}
+		lag = append(lag, &replicationLag{
+			host: m.Name,
+			lag:  optimePrimary.Sub(m.OptimeDate),
+		})
 	}
 
 	return lag, nil
